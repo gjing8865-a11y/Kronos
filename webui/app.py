@@ -237,19 +237,20 @@ def create_prediction_chart(df, pred_df, lookback, pred_len, actual_df=None, his
     
     # Add prediction data (candlestick chart)
     if pred_df is not None and len(pred_df) > 0:
-        # Calculate prediction data timestamps - ensure continuity with historical data
-        if 'timestamps' in df.columns and len(historical_df) > 0:
-            # Start from the last timestamp of historical data, create prediction timestamps with the same time interval
+        pred_timestamps = None
+        if isinstance(pred_df.index, pd.DatetimeIndex):
+            pred_timestamps = pred_df.index
+        elif 'timestamps' in pred_df.columns:
+            pred_timestamps = pred_df['timestamps']
+        elif 'timestamps' in df.columns and len(historical_df) > 0:
             last_timestamp = historical_df['timestamps'].iloc[-1]
             time_diff = df['timestamps'].iloc[1] - df['timestamps'].iloc[0] if len(df) > 1 else pd.Timedelta(hours=1)
-            
             pred_timestamps = pd.date_range(
                 start=last_timestamp + time_diff,
                 periods=len(pred_df),
                 freq=time_diff
             )
         else:
-            # If no timestamps, use index
             pred_timestamps = range(len(historical_df), len(historical_df) + len(pred_df))
         
         fig.add_trace(go.Candlestick(
@@ -265,23 +266,20 @@ def create_prediction_chart(df, pred_df, lookback, pred_len, actual_df=None, his
     
     # Add actual data for comparison (if exists)
     if actual_df is not None and len(actual_df) > 0:
-        # Actual data should be in the same time period as prediction data
-        if 'timestamps' in df.columns:
-            # Actual data should use the same timestamps as prediction data to ensure time alignment
-            if 'pred_timestamps' in locals():
-                actual_timestamps = pred_timestamps
-            else:
-                # If no prediction timestamps, calculate from the last timestamp of historical data
-                if len(historical_df) > 0:
-                    last_timestamp = historical_df['timestamps'].iloc[-1]
-                    time_diff = df['timestamps'].iloc[1] - df['timestamps'].iloc[0] if len(df) > 1 else pd.Timedelta(hours=1)
-                    actual_timestamps = pd.date_range(
-                        start=last_timestamp + time_diff,
-                        periods=len(actual_df),
-                        freq=time_diff
-                    )
-                else:
-                    actual_timestamps = range(len(historical_df), len(historical_df) + len(actual_df))
+        if 'timestamps' in actual_df.columns:
+            actual_timestamps = actual_df['timestamps']
+        elif isinstance(actual_df.index, pd.DatetimeIndex):
+            actual_timestamps = actual_df.index
+        elif 'pred_timestamps' in locals() and pred_timestamps is not None:
+            actual_timestamps = pred_timestamps
+        elif 'timestamps' in df.columns and len(historical_df) > 0:
+            last_timestamp = historical_df['timestamps'].iloc[-1]
+            time_diff = df['timestamps'].iloc[1] - df['timestamps'].iloc[0] if len(df) > 1 else pd.Timedelta(hours=1)
+            actual_timestamps = pd.date_range(
+                start=last_timestamp + time_diff,
+                periods=len(actual_df),
+                freq=time_diff
+            )
         else:
             actual_timestamps = range(len(historical_df), len(historical_df) + len(actual_df))
         
@@ -547,41 +545,14 @@ def predict():
         
         chart_json = create_prediction_chart(df, pred_df, lookback, pred_len, actual_df, historical_start_idx)
         
-        # Prepare prediction result data - fix timestamp calculation logic
-        if 'timestamps' in df.columns:
-            if start_date:
-                # Custom time period: use selected window data to calculate timestamps
-                start_dt = pd.to_datetime(start_date)
-                mask = df['timestamps'] >= start_dt
-                time_range_df = df[mask]
-                
-                if len(time_range_df) >= lookback:
-                    # Calculate prediction timestamps starting from last time point of selected window
-                    last_timestamp = time_range_df['timestamps'].iloc[lookback-1]
-                    time_diff = df['timestamps'].iloc[1] - df['timestamps'].iloc[0]
-                    future_timestamps = pd.date_range(
-                        start=last_timestamp + time_diff,
-                        periods=pred_len,
-                        freq=time_diff
-                    )
-                else:
-                    future_timestamps = []
-            else:
-                # Latest data: calculate from last time point of entire data file
-                last_timestamp = df['timestamps'].iloc[-1]
-                time_diff = df['timestamps'].iloc[1] - df['timestamps'].iloc[0]
-                future_timestamps = pd.date_range(
-                    start=last_timestamp + time_diff,
-                    periods=pred_len,
-                    freq=time_diff
-                )
-        else:
-            future_timestamps = range(len(df), len(df) + pred_len)
-        
         prediction_results = []
-        for i, (_, row) in enumerate(pred_df.iterrows()):
+        for ts_val, row in pred_df.iterrows():
+            if isinstance(ts_val, pd.Timestamp):
+                timestamp_str = ts_val.isoformat()
+            else:
+                timestamp_str = str(ts_val)
             prediction_results.append({
-                'timestamp': future_timestamps[i].isoformat() if i < len(future_timestamps) else f"T{i}",
+                'timestamp': timestamp_str,
                 'open': float(row['open']),
                 'high': float(row['high']),
                 'low': float(row['low']),

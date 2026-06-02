@@ -469,7 +469,34 @@ def auto_regressive_inference(tokenizer, model, x, x_stamp, y_stamp, max_context
         return preds
 
 
+def _normalize_timestamps(value, arg_name):
+    if isinstance(value, pd.DatetimeIndex):
+        value = pd.Series(value, name='timestamps')
+    elif isinstance(value, np.ndarray):
+        if not np.issubdtype(value.dtype, np.datetime64):
+            raise TypeError(
+                f"{arg_name} must be datetime-like, got ndarray with dtype={value.dtype}"
+            )
+        value = pd.Series(value, name='timestamps')
+    elif isinstance(value, (list, tuple)):
+        value = pd.Series(pd.to_datetime(value), name='timestamps')
+    elif isinstance(value, pd.Series):
+        if value.dtype != 'datetime64[ns]':
+            value = pd.to_datetime(value)
+    else:
+        raise TypeError(
+            f"{arg_name} must be a pandas Series, DatetimeIndex, "
+            f"numpy datetime64 array, or list of datetime-like values, "
+            f"got {type(value).__name__}"
+        )
+    if len(value) == 0:
+        raise ValueError(f"{arg_name} must not be empty")
+    value = value.reset_index(drop=True)
+    return value
+
+
 def calc_time_stamps(x_timestamp):
+    x_timestamp = _normalize_timestamps(x_timestamp, 'x_timestamp')
     time_df = pd.DataFrame()
     time_df['minute'] = x_timestamp.dt.minute
     time_df['hour'] = x_timestamp.dt.hour

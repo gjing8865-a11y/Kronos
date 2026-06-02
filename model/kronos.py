@@ -469,7 +469,19 @@ def auto_regressive_inference(tokenizer, model, x, x_stamp, y_stamp, max_context
         return preds
 
 
+def _normalize_timestamps(value, arg_name):
+    """Normalize timestamps to a pandas Series of datetime."""
+    if isinstance(value, pd.DatetimeIndex):
+        return pd.Series(value, name='timestamps')
+    elif isinstance(value, pd.Series):
+        if not pd.api.types.is_datetime64_any_dtype(value):
+            return pd.to_datetime(value)
+        return value
+    else:
+        return pd.Series(pd.to_datetime(value), name='timestamps')
+
 def calc_time_stamps(x_timestamp):
+    x_timestamp = _normalize_timestamps(x_timestamp, 'x_timestamp')
     time_df = pd.DataFrame()
     time_df['minute'] = x_timestamp.dt.minute
     time_df['hour'] = x_timestamp.dt.hour

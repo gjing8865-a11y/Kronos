@@ -470,12 +470,6 @@ def predict():
                     y_timestamp = df.iloc[lookback:lookback+pred_len]['timestamps']
                     prediction_type = "Kronos model prediction (latest data)"
                 
-                # Ensure timestamps are Series format, not DatetimeIndex, to avoid .dt attribute error in Kronos model
-                if isinstance(x_timestamp, pd.DatetimeIndex):
-                    x_timestamp = pd.Series(x_timestamp, name='timestamps')
-                if isinstance(y_timestamp, pd.DatetimeIndex):
-                    y_timestamp = pd.Series(y_timestamp, name='timestamps')
-                
                 pred_df = predictor.predict(
                     df=x_df,
                     x_timestamp=x_timestamp,

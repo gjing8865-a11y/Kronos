@@ -8,18 +8,18 @@ import torch
 from tqdm import tqdm
 
 from model import Kronos, KronosPredictor, KronosTokenizer
+from model.kronos import _normalize_timestamps, calc_time_stamps
+from webui import app as webui_app
 
 TEST_DATA_ROOT = Path(__file__).parent / "data"
 INPUT_DATA_PATH = TEST_DATA_ROOT / "regression_input.csv"
 
-# Regression test configuration
 OUTPUT_DATA_DIR = TEST_DATA_ROOT
 TEST_CTX_LEN = [512, 256]
 PRED_LEN = 8
 REL_TOLERANCE = 1e-5
 FEATURE_NAMES = ["open", "high", "low", "close", "volume", "amount"]
 
-# MSE regression test configuration
 MSE_SAMPLE_SIZE = 4
 MSE_CTX_LEN = [512, 256]
 MSE_EXPECTED = [0.008979, 0.003741]
@@ -32,6 +32,7 @@ TOKENIZER_REVISION = "0e0117387f39004a9016484a186a908917e22426"
 MAX_CTX_LEN = 512
 SEED = 123
 DEVICE = "cpu"
+
 
 def set_seed(seed: int) -> None:
     random.seed(seed)
@@ -87,6 +88,7 @@ def test_kronos_predictor_regression(context_len):
 
     np.testing.assert_allclose(obtained, expected, rtol=REL_TOLERANCE)
 
+
 @pytest.mark.parametrize("context_len, expected_mse", zip(MSE_CTX_LEN, MSE_EXPECTED))
 def test_kronos_predictor_mse(context_len, expected_mse):
     set_seed(SEED)
@@ -138,3 +140,234 @@ def test_kronos_predictor_mse(context_len, expected_mse):
     print(f"Average MSE: {mse} (Diff vs expected: {mse_diff:+})")
 
     assert abs(mse_diff) <= MSE_TOLERANCE, f"MSE {mse} differs from expected {expected_mse}"
+
+
+class _DummyModule(torch.nn.Module):
+    pass
+
+
+class CapturingPredictor(KronosPredictor):
+    def __init__(self):
+        super().__init__(_DummyModule(), _DummyModule(), device="cpu", max_context=16)
+        self.last_generate_call = None
+
+    def generate(self, x, x_stamp, y_stamp, pred_len, T, top_k, top_p, sample_count, verbose):
+        self.last_generate_call = {
+            "x_shape": tuple(x.shape),
+            "x_stamp_shape": tuple(x_stamp.shape),
+            "y_stamp_shape": tuple(y_stamp.shape),
+            "pred_len": pred_len,
+        }
+        return np.zeros((x.shape[0], pred_len, x.shape[-1]), dtype=np.float32)
+
+
+class RoutePredictor:
+    def __init__(self):
+        self.calls = []
+
+    def predict(self, df, x_timestamp, y_timestamp, pred_len, T=1.0, top_p=0.9, sample_count=1):
+        normalized_x = pd.Series(pd.to_datetime(x_timestamp)).reset_index(drop=True)
+        normalized_y = pd.Series(pd.to_datetime(y_timestamp)).reset_index(drop=True)
+        self.calls.append(
+            {
+                "df": df.copy(),
+                "x_timestamp": normalized_x,
+                "y_timestamp": normalized_y,
+                "pred_len": pred_len,
+            }
+        )
+
+        result = pd.DataFrame(
+            {
+                "open": np.linspace(10.0, 10.0 + pred_len - 1, pred_len),
+                "high": np.linspace(10.5, 10.5 + pred_len - 1, pred_len),
+                "low": np.linspace(9.5, 9.5 + pred_len - 1, pred_len),
+                "close": np.linspace(10.2, 10.2 + pred_len - 1, pred_len),
+                "volume": np.linspace(1000.0, 1000.0 + pred_len - 1, pred_len),
+                "amount": np.linspace(2000.0, 2000.0 + pred_len - 1, pred_len),
+            },
+            index=pd.DatetimeIndex(normalized_y),
+        )
+        return result
+
+
+@pytest.fixture
+def sample_market_df():
+    periods = 12
+    timestamps = pd.date_range("2024-01-01 09:00:00", periods=periods, freq="h")
+    base = np.arange(periods, dtype=np.float32)
+    return pd.DataFrame(
+        {
+            "timestamps": timestamps,
+            "open": 100 + base,
+            "high": 101 + base,
+            "low": 99 + base,
+            "close": 100.5 + base,
+            "volume": 1000 + base,
+            "amount": 2000 + base,
+        }
+    )
+
+
+def test_normalize_timestamps_and_calc_time_stamps_accept_datetime_index():
+    timestamps = pd.date_range("2024-02-01 15:30:00", periods=3, freq="h")
+
+    normalized = _normalize_timestamps(timestamps, "x_timestamp")
+    time_df = calc_time_stamps(timestamps)
+
+    assert isinstance(normalized, pd.Series)
+    assert normalized.tolist() == list(timestamps)
+    assert time_df.to_dict("records") == [
+        {"minute": 30, "hour": 15, "weekday": 3, "day": 1, "month": 2},
+        {"minute": 30, "hour": 16, "weekday": 3, "day": 1, "month": 2},
+        {"minute": 30, "hour": 17, "weekday": 3, "day": 1, "month": 2},
+    ]
+
+
+def test_normalize_timestamps_rejects_invalid_values():
+    with pytest.raises(ValueError, match="contains invalid timestamps"):
+        _normalize_timestamps(["2024-01-01", "bad-timestamp"], "y_timestamp")
+
+
+def test_kronos_predictor_predict_normalizes_timestamp_inputs():
+    predictor = CapturingPredictor()
+    df = pd.DataFrame(
+        {
+            "open": [1.0, 2.0, 3.0, 4.0],
+            "high": [1.5, 2.5, 3.5, 4.5],
+            "low": [0.5, 1.5, 2.5, 3.5],
+            "close": [1.2, 2.2, 3.2, 4.2],
+            "volume": [10.0, 11.0, 12.0, 13.0],
+        }
+    )
+    x_timestamp = pd.date_range("2024-03-01 09:00:00", periods=4, freq="h")
+    y_timestamp = pd.DatetimeIndex(pd.date_range("2024-03-01 13:00:00", periods=2, freq="h"))
+
+    pred_df = predictor.predict(
+        df=df,
+        x_timestamp=x_timestamp,
+        y_timestamp=y_timestamp,
+        pred_len=2,
+        verbose=False,
+        sample_count=1,
+    )
+
+    assert predictor.last_generate_call == {
+        "x_shape": (1, 4, 6),
+        "x_stamp_shape": (1, 4, 5),
+        "y_stamp_shape": (1, 2, 5),
+        "pred_len": 2,
+    }
+    assert list(pred_df.index) == list(y_timestamp)
+    assert list(pred_df.columns) == ["open", "high", "low", "close", "volume", "amount"]
+
+
+def test_kronos_predictor_predict_rejects_timestamp_length_mismatch():
+    predictor = CapturingPredictor()
+    df = pd.DataFrame(
+        {
+            "open": [1.0, 2.0, 3.0, 4.0],
+            "high": [1.5, 2.5, 3.5, 4.5],
+            "low": [0.5, 1.5, 2.5, 3.5],
+            "close": [1.2, 2.2, 3.2, 4.2],
+            "volume": [10.0, 11.0, 12.0, 13.0],
+        }
+    )
+
+    with pytest.raises(ValueError, match="x_timestamp length should match df length"):
+        predictor.predict(
+            df=df,
+            x_timestamp=pd.date_range("2024-03-01 09:00:00", periods=3, freq="h"),
+            y_timestamp=pd.date_range("2024-03-01 13:00:00", periods=2, freq="h"),
+            pred_len=2,
+            verbose=False,
+            sample_count=1,
+        )
+
+
+def test_api_predict_uses_latest_comparable_window(monkeypatch, sample_market_df):
+    route_predictor = RoutePredictor()
+    monkeypatch.setattr(webui_app, "MODEL_AVAILABLE", True)
+    monkeypatch.setattr(webui_app, "predictor", route_predictor)
+    monkeypatch.setattr(webui_app, "load_data_file", lambda _: (sample_market_df.copy(), None))
+    monkeypatch.setattr(webui_app, "save_prediction_results", lambda **kwargs: None)
+
+    client = webui_app.app.test_client()
+    response = client.post(
+        "/api/predict",
+        json={"file_path": "/tmp/data.csv", "lookback": 4, "pred_len": 3, "temperature": 1.0, "top_p": 0.9, "sample_count": 1},
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    expected_x = sample_market_df["timestamps"].iloc[5:9].reset_index(drop=True)
+    expected_y = sample_market_df["timestamps"].iloc[9:12].reset_index(drop=True)
+
+    assert route_predictor.calls[0]["x_timestamp"].equals(expected_x)
+    assert route_predictor.calls[0]["y_timestamp"].equals(expected_y)
+    assert payload["success"] is True
+    assert payload["has_comparison"] is True
+    assert payload["prediction_type"] == "Kronos model prediction (latest comparable window)"
+    assert [item["timestamp"] for item in payload["prediction_results"]] == [ts.isoformat() for ts in expected_y]
+    assert [item["timestamp"] for item in payload["actual_data"]] == [ts.isoformat() for ts in expected_y]
+
+
+def test_api_predict_generates_future_timestamps_without_comparison(monkeypatch, sample_market_df):
+    route_predictor = RoutePredictor()
+    truncated_df = sample_market_df.iloc[:4].copy()
+    monkeypatch.setattr(webui_app, "MODEL_AVAILABLE", True)
+    monkeypatch.setattr(webui_app, "predictor", route_predictor)
+    monkeypatch.setattr(webui_app, "load_data_file", lambda _: (truncated_df, None))
+    monkeypatch.setattr(webui_app, "save_prediction_results", lambda **kwargs: None)
+
+    client = webui_app.app.test_client()
+    response = client.post(
+        "/api/predict",
+        json={"file_path": "/tmp/data.csv", "lookback": 4, "pred_len": 2, "temperature": 1.0, "top_p": 0.9, "sample_count": 1},
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    expected_future = pd.date_range(truncated_df["timestamps"].iloc[-1] + pd.Timedelta(hours=1), periods=2, freq="h")
+
+    assert route_predictor.calls[0]["x_timestamp"].equals(truncated_df["timestamps"].reset_index(drop=True))
+    assert route_predictor.calls[0]["y_timestamp"].equals(pd.Series(expected_future, name="timestamps"))
+    assert payload["success"] is True
+    assert payload["has_comparison"] is False
+    assert payload["actual_data"] == []
+    assert [item["timestamp"] for item in payload["prediction_results"]] == [ts.isoformat() for ts in expected_future]
+
+
+def test_api_predict_respects_selected_start_window(monkeypatch, sample_market_df):
+    route_predictor = RoutePredictor()
+    monkeypatch.setattr(webui_app, "MODEL_AVAILABLE", True)
+    monkeypatch.setattr(webui_app, "predictor", route_predictor)
+    monkeypatch.setattr(webui_app, "load_data_file", lambda _: (sample_market_df.copy(), None))
+    monkeypatch.setattr(webui_app, "save_prediction_results", lambda **kwargs: None)
+
+    start_timestamp = sample_market_df["timestamps"].iloc[2]
+    client = webui_app.app.test_client()
+    response = client.post(
+        "/api/predict",
+        json={
+            "file_path": "/tmp/data.csv",
+            "lookback": 4,
+            "pred_len": 3,
+            "start_date": start_timestamp.strftime("%Y-%m-%dT%H:%M"),
+            "temperature": 1.0,
+            "top_p": 0.9,
+            "sample_count": 1,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    expected_x = sample_market_df["timestamps"].iloc[2:6].reset_index(drop=True)
+    expected_y = sample_market_df["timestamps"].iloc[6:9].reset_index(drop=True)
+
+    assert route_predictor.calls[0]["x_timestamp"].equals(expected_x)
+    assert route_predictor.calls[0]["y_timestamp"].equals(expected_y)
+    assert payload["success"] is True
+    assert payload["has_comparison"] is True
+    assert [item["timestamp"] for item in payload["prediction_results"]] == [ts.isoformat() for ts in expected_y]
+    assert [item["timestamp"] for item in payload["actual_data"]] == [ts.isoformat() for ts in expected_y]

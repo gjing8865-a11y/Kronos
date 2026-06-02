@@ -469,7 +469,29 @@ def auto_regressive_inference(tokenizer, model, x, x_stamp, y_stamp, max_context
         return preds
 
 
+def _normalize_timestamps(value, arg_name):
+    if isinstance(value, pd.Series):
+        timestamps = value.copy()
+    elif isinstance(value, (pd.DatetimeIndex, pd.Index, list, tuple, np.ndarray)):
+        array = np.asarray(value)
+        if array.ndim != 1:
+            raise ValueError(f"{arg_name} must be one-dimensional, got shape {array.shape}.")
+        timestamps = pd.Series(value, name=arg_name)
+    else:
+        raise ValueError(
+            f"{arg_name} must be a pandas Series, DatetimeIndex, Index, list, tuple, or numpy array."
+        )
+
+    timestamps = timestamps.reset_index(drop=True)
+    timestamps = pd.to_datetime(timestamps, errors='coerce')
+    if timestamps.isna().any():
+        raise ValueError(f"{arg_name} contains invalid timestamps.")
+
+    return timestamps
+
+
 def calc_time_stamps(x_timestamp):
+    x_timestamp = _normalize_timestamps(x_timestamp, 'x_timestamp')
     time_df = pd.DataFrame()
     time_df['minute'] = x_timestamp.dt.minute
     time_df['hour'] = x_timestamp.dt.hour
@@ -526,13 +548,21 @@ class KronosPredictor:
 
         df = df.copy()
         if self.vol_col not in df.columns:
-            df[self.vol_col] = 0.0  # Fill missing volume with zeros
-            df[self.amt_vol] = 0.0  # Fill missing amount with zeros
+            df[self.vol_col] = 0.0
+            df[self.amt_vol] = 0.0
         if self.amt_vol not in df.columns and self.vol_col in df.columns:
             df[self.amt_vol] = df[self.vol_col] * df[self.price_cols].mean(axis=1)
 
         if df[self.price_cols + [self.vol_col, self.amt_vol]].isnull().values.any():
             raise ValueError("Input DataFrame contains NaN values in price or volume columns.")
+
+        x_timestamp = _normalize_timestamps(x_timestamp, 'x_timestamp')
+        y_timestamp = _normalize_timestamps(y_timestamp, 'y_timestamp')
+
+        if len(df) != len(x_timestamp):
+            raise ValueError(f"x_timestamp length should match df length, got {len(x_timestamp)} vs {len(df)}.")
+        if len(y_timestamp) != pred_len:
+            raise ValueError(f"y_timestamp length should equal pred_len={pred_len}, got {len(y_timestamp)}.")
 
         x_time_df = calc_time_stamps(x_timestamp)
         y_time_df = calc_time_stamps(y_timestamp)
@@ -589,6 +619,7 @@ class KronosPredictor:
         x_list = []
         x_stamp_list = []
         y_stamp_list = []
+        normalized_y_timestamps = []
         means = []
         stds = []
         seq_lens = []
@@ -611,8 +642,8 @@ class KronosPredictor:
             if df[self.price_cols + [self.vol_col, self.amt_vol]].isnull().values.any():
                 raise ValueError(f"DataFrame at index {i} contains NaN values in price or volume columns.")
 
-            x_timestamp = x_timestamp_list[i]
-            y_timestamp = y_timestamp_list[i]
+            x_timestamp = _normalize_timestamps(x_timestamp_list[i], f'x_timestamp_list[{i}]')
+            y_timestamp = _normalize_timestamps(y_timestamp_list[i], f'y_timestamp_list[{i}]')
 
             x_time_df = calc_time_stamps(x_timestamp)
             y_time_df = calc_time_stamps(y_timestamp)
@@ -633,6 +664,7 @@ class KronosPredictor:
             x_list.append(x_norm)
             x_stamp_list.append(x_stamp)
             y_stamp_list.append(y_stamp)
+            normalized_y_timestamps.append(y_timestamp)
             means.append(x_mean)
             stds.append(x_std)
 
@@ -655,7 +687,7 @@ class KronosPredictor:
         pred_dfs = []
         for i in range(num_series):
             preds_i = preds[i] * (stds[i] + 1e-5) + means[i]
-            pred_df = pd.DataFrame(preds_i, columns=self.price_cols + [self.vol_col, self.amt_vol], index=y_timestamp_list[i])
+            pred_df = pd.DataFrame(preds_i, columns=self.price_cols + [self.vol_col, self.amt_vol], index=normalized_y_timestamps[i])
             pred_dfs.append(pred_df)
 
         return pred_dfs

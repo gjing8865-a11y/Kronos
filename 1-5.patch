@@ -1,126 +1,251 @@
-diff --git a/model/kronos.py b/model/kronos.py
-index ce4494e..122d5bc 100644
---- a/model/kronos.py
-+++ b/model/kronos.py
-@@ -469,7 +469,28 @@ def auto_regressive_inference(tokenizer, model, x, x_stamp, y_stamp, max_context
-         return preds
- 
- 
-+def _normalize_timestamps(value, arg_name):
-+    if isinstance(value, pd.DatetimeIndex):
-+        value = pd.Series(value, name=arg_name)
-+    elif isinstance(value, np.ndarray):
-+        value = pd.Series(value, name=arg_name)
-+    elif isinstance(value, (list, tuple)):
-+        value = pd.Series(value, name=arg_name)
-+    elif not isinstance(value, pd.Series):
-+        raise TypeError(
-+            f"{arg_name} must be a pd.Series, pd.DatetimeIndex, np.ndarray, or list/tuple, "
-+            f"got {type(value).__name__}"
-+        )
-+    if not isinstance(value.dtype, pd.DatetimeTZDtype) and not pd.api.types.is_datetime64_any_dtype(value):
-+        value = pd.to_datetime(value, errors='raise')
-+    if value.isnull().any():
-+        raise ValueError(f"{arg_name} contains null values after datetime conversion")
-+    value = value.reset_index(drop=True)
-+    return value
+diff --git a/1-5.patch b/1-5.patch
+index a7a4bb7..e69de29 100644
+--- a/1-5.patch
++++ b/1-5.patch
+@@ -1,126 +0,0 @@
+-diff --git a/model/kronos.py b/model/kronos.py
+-index ce4494e..122d5bc 100644
+---- a/model/kronos.py
+-+++ b/model/kronos.py
+-@@ -469,7 +469,28 @@ def auto_regressive_inference(tokenizer, model, x, x_stamp, y_stamp, max_context
+-         return preds
+- 
+- 
+-+def _normalize_timestamps(value, arg_name):
+-+    if isinstance(value, pd.DatetimeIndex):
+-+        value = pd.Series(value, name=arg_name)
+-+    elif isinstance(value, np.ndarray):
+-+        value = pd.Series(value, name=arg_name)
+-+    elif isinstance(value, (list, tuple)):
+-+        value = pd.Series(value, name=arg_name)
+-+    elif not isinstance(value, pd.Series):
+-+        raise TypeError(
+-+            f"{arg_name} must be a pd.Series, pd.DatetimeIndex, np.ndarray, or list/tuple, "
+-+            f"got {type(value).__name__}"
+-+        )
+-+    if not isinstance(value.dtype, pd.DatetimeTZDtype) and not pd.api.types.is_datetime64_any_dtype(value):
+-+        value = pd.to_datetime(value, errors='raise')
+-+    if value.isnull().any():
+-+        raise ValueError(f"{arg_name} contains null values after datetime conversion")
+-+    value = value.reset_index(drop=True)
+-+    return value
+-+
+-+
+- def calc_time_stamps(x_timestamp):
+-+    x_timestamp = _normalize_timestamps(x_timestamp, 'x_timestamp')
+-     time_df = pd.DataFrame()
+-     time_df['minute'] = x_timestamp.dt.minute
+-     time_df['hour'] = x_timestamp.dt.hour
+-@@ -534,6 +555,18 @@ class KronosPredictor:
+-         if df[self.price_cols + [self.vol_col, self.amt_vol]].isnull().values.any():
+-             raise ValueError("Input DataFrame contains NaN values in price or volume columns.")
+- 
+-+        x_timestamp = _normalize_timestamps(x_timestamp, 'x_timestamp')
+-+        y_timestamp = _normalize_timestamps(y_timestamp, 'y_timestamp')
+-+
+-+        if len(x_timestamp) != len(df):
+-+            raise ValueError(
+-+                f"x_timestamp length ({len(x_timestamp)}) must match DataFrame row count ({len(df)})"
+-+            )
+-+        if len(y_timestamp) != pred_len:
+-+            raise ValueError(
+-+                f"y_timestamp length ({len(y_timestamp)}) must equal pred_len ({pred_len})"
+-+            )
+-+
+-         x_time_df = calc_time_stamps(x_timestamp)
+-         y_time_df = calc_time_stamps(y_timestamp)
+- 
+-@@ -614,6 +647,20 @@ class KronosPredictor:
+-             x_timestamp = x_timestamp_list[i]
+-             y_timestamp = y_timestamp_list[i]
+- 
+-+            x_timestamp = _normalize_timestamps(x_timestamp, f'x_timestamp_list[{i}]')
+-+            y_timestamp = _normalize_timestamps(y_timestamp, f'y_timestamp_list[{i}]')
+-+            x_timestamp_list[i] = x_timestamp
+-+            y_timestamp_list[i] = y_timestamp
+-+
+-+            if len(x_timestamp) != len(df):
+-+                raise ValueError(
+-+                    f"x_timestamp length at index {i} ({len(x_timestamp)}) must match DataFrame row count ({len(df)})"
+-+                )
+-+            if len(y_timestamp) != pred_len:
+-+                raise ValueError(
+-+                    f"y_timestamp length at index {i} ({len(y_timestamp)}) must equal pred_len ({pred_len})"
+-+                )
+-+
+-             x_time_df = calc_time_stamps(x_timestamp)
+-             y_time_df = calc_time_stamps(y_timestamp)
+- 
+-diff --git a/webui/app.py b/webui/app.py
+-index d240a37..dc1cbd0 100644
+---- a/webui/app.py
+-+++ b/webui/app.py
+-@@ -547,41 +547,15 @@ def predict():
+-         
+-         chart_json = create_prediction_chart(df, pred_df, lookback, pred_len, actual_df, historical_start_idx)
+-         
+--        # Prepare prediction result data - fix timestamp calculation logic
+--        if 'timestamps' in df.columns:
+--            if start_date:
+--                # Custom time period: use selected window data to calculate timestamps
+--                start_dt = pd.to_datetime(start_date)
+--                mask = df['timestamps'] >= start_dt
+--                time_range_df = df[mask]
+--                
+--                if len(time_range_df) >= lookback:
+--                    # Calculate prediction timestamps starting from last time point of selected window
+--                    last_timestamp = time_range_df['timestamps'].iloc[lookback-1]
+--                    time_diff = df['timestamps'].iloc[1] - df['timestamps'].iloc[0]
+--                    future_timestamps = pd.date_range(
+--                        start=last_timestamp + time_diff,
+--                        periods=pred_len,
+--                        freq=time_diff
+--                    )
+--                else:
+--                    future_timestamps = []
+--            else:
+--                # Latest data: calculate from last time point of entire data file
+--                last_timestamp = df['timestamps'].iloc[-1]
+--                time_diff = df['timestamps'].iloc[1] - df['timestamps'].iloc[0]
+--                future_timestamps = pd.date_range(
+--                    start=last_timestamp + time_diff,
+--                    periods=pred_len,
+--                    freq=time_diff
+--                )
+--        else:
+--            future_timestamps = range(len(df), len(df) + pred_len)
+--        
+-+        # Prepare prediction result data - use timestamps from pred_df index (y_timestamp passed to model)
+-         prediction_results = []
+--        for i, (_, row) in enumerate(pred_df.iterrows()):
+-+        for i, (ts, row) in enumerate(pred_df.iterrows()):
+-+            if isinstance(ts, pd.Timestamp):
+-+                ts_str = ts.isoformat()
+-+            else:
+-+                ts_str = str(ts)
+-             prediction_results.append({
+--                'timestamp': future_timestamps[i].isoformat() if i < len(future_timestamps) else f"T{i}",
+-+                'timestamp': ts_str,
+-                 'open': float(row['open']),
+-                 'high': float(row['high']),
+-                 'low': float(row['low']),
+diff --git a/tests/test_timestamp_consistency.py b/tests/test_timestamp_consistency.py
+index cd42eb1..b32758c 100644
+--- a/tests/test_timestamp_consistency.py
++++ b/tests/test_timestamp_consistency.py
+@@ -484,3 +484,115 @@ class TestTimestampPipeline:
+         assert result["hour"].tolist() == [9, 15, 23]
+         assert result["day"].tolist() == [15, 30, 1]
+         assert result["month"].tolist() == [1, 6, 12]
 +
 +
- def calc_time_stamps(x_timestamp):
-+    x_timestamp = _normalize_timestamps(x_timestamp, 'x_timestamp')
-     time_df = pd.DataFrame()
-     time_df['minute'] = x_timestamp.dt.minute
-     time_df['hour'] = x_timestamp.dt.hour
-@@ -534,6 +555,18 @@ class KronosPredictor:
-         if df[self.price_cols + [self.vol_col, self.amt_vol]].isnull().values.any():
-             raise ValueError("Input DataFrame contains NaN values in price or volume columns.")
- 
-+        x_timestamp = _normalize_timestamps(x_timestamp, 'x_timestamp')
-+        y_timestamp = _normalize_timestamps(y_timestamp, 'y_timestamp')
++class TestNormalizeTimestampsStrict:
 +
-+        if len(x_timestamp) != len(df):
-+            raise ValueError(
-+                f"x_timestamp length ({len(x_timestamp)}) must match DataFrame row count ({len(df)})"
-+            )
-+        if len(y_timestamp) != pred_len:
-+            raise ValueError(
-+                f"y_timestamp length ({len(y_timestamp)}) must equal pred_len ({pred_len})"
-+            )
++    def test_tuple_input(self):
++        ts_tuple = tuple(pd.date_range("2024-01-01", periods=10, freq="1H"))
++        result = _normalize_timestamps(ts_tuple, "ts")
++        assert isinstance(result, pd.Series)
++        assert pd.api.types.is_datetime64_any_dtype(result)
++        assert len(result) == 10
 +
-         x_time_df = calc_time_stamps(x_timestamp)
-         y_time_df = calc_time_stamps(y_timestamp)
- 
-@@ -614,6 +647,20 @@ class KronosPredictor:
-             x_timestamp = x_timestamp_list[i]
-             y_timestamp = y_timestamp_list[i]
- 
-+            x_timestamp = _normalize_timestamps(x_timestamp, f'x_timestamp_list[{i}]')
-+            y_timestamp = _normalize_timestamps(y_timestamp, f'y_timestamp_list[{i}]')
-+            x_timestamp_list[i] = x_timestamp
-+            y_timestamp_list[i] = y_timestamp
++    def test_series_with_non_default_index(self):
++        ts = pd.Series(pd.date_range("2024-01-01", periods=10, freq="1H"), index=range(5, 15))
++        result = _normalize_timestamps(ts, "ts")
++        assert list(result.index) == list(range(10))
 +
-+            if len(x_timestamp) != len(df):
-+                raise ValueError(
-+                    f"x_timestamp length at index {i} ({len(x_timestamp)}) must match DataFrame row count ({len(df)})"
-+                )
-+            if len(y_timestamp) != pred_len:
-+                raise ValueError(
-+                    f"y_timestamp length at index {i} ({len(y_timestamp)}) must equal pred_len ({pred_len})"
-+                )
++    def test_series_string_timestamps(self):
++        ts = pd.Series([f"2024-01-01 {i:02d}:00:00" for i in range(10)])
++        result = _normalize_timestamps(ts, "ts")
++        assert pd.api.types.is_datetime64_any_dtype(result)
 +
-             x_time_df = calc_time_stamps(x_timestamp)
-             y_time_df = calc_time_stamps(y_timestamp)
- 
-diff --git a/webui/app.py b/webui/app.py
-index d240a37..dc1cbd0 100644
---- a/webui/app.py
-+++ b/webui/app.py
-@@ -547,41 +547,15 @@ def predict():
-         
-         chart_json = create_prediction_chart(df, pred_df, lookback, pred_len, actual_df, historical_start_idx)
-         
--        # Prepare prediction result data - fix timestamp calculation logic
--        if 'timestamps' in df.columns:
--            if start_date:
--                # Custom time period: use selected window data to calculate timestamps
--                start_dt = pd.to_datetime(start_date)
--                mask = df['timestamps'] >= start_dt
--                time_range_df = df[mask]
--                
--                if len(time_range_df) >= lookback:
--                    # Calculate prediction timestamps starting from last time point of selected window
--                    last_timestamp = time_range_df['timestamps'].iloc[lookback-1]
--                    time_diff = df['timestamps'].iloc[1] - df['timestamps'].iloc[0]
--                    future_timestamps = pd.date_range(
--                        start=last_timestamp + time_diff,
--                        periods=pred_len,
--                        freq=time_diff
--                    )
--                else:
--                    future_timestamps = []
--            else:
--                # Latest data: calculate from last time point of entire data file
--                last_timestamp = df['timestamps'].iloc[-1]
--                time_diff = df['timestamps'].iloc[1] - df['timestamps'].iloc[0]
--                future_timestamps = pd.date_range(
--                    start=last_timestamp + time_diff,
--                    periods=pred_len,
--                    freq=time_diff
--                )
--        else:
--            future_timestamps = range(len(df), len(df) + pred_len)
--        
-+        # Prepare prediction result data - use timestamps from pred_df index (y_timestamp passed to model)
-         prediction_results = []
--        for i, (_, row) in enumerate(pred_df.iterrows()):
-+        for i, (ts, row) in enumerate(pred_df.iterrows()):
-+            if isinstance(ts, pd.Timestamp):
-+                ts_str = ts.isoformat()
-+            else:
-+                ts_str = str(ts)
-             prediction_results.append({
--                'timestamp': future_timestamps[i].isoformat() if i < len(future_timestamps) else f"T{i}",
-+                'timestamp': ts_str,
-                 'open': float(row['open']),
-                 'high': float(row['high']),
-                 'low': float(row['low']),
++    def test_numeric_values_raises(self):
++        with pytest.raises((ValueError, TypeError)):
++            _normalize_timestamps([1, 2, 3], "ts")
++
++    def test_single_timestamp(self):
++        ts = pd.Series([pd.Timestamp("2024-01-01 10:00:00")])
++        result = _normalize_timestamps(ts, "ts")
++        assert len(result) == 1
++        assert result.iloc[0] == pd.Timestamp("2024-01-01 10:00:00")
++
++    def test_mixed_datetime_types_conversion(self):
++        ts_list = [
++            pd.Timestamp("2024-01-01"),
++            "2024-01-02",
++            np.datetime64("2024-01-03"),
++        ]
++        result = _normalize_timestamps(ts_list, "ts")
++        assert len(result) == 3
++        assert pd.api.types.is_datetime64_any_dtype(result)
++
++    def test_name_preservation(self):
++        ts = pd.Series(pd.date_range("2024-01-01", periods=5, freq="1H"), name="custom_ts")
++        result = _normalize_timestamps(ts, "ts")
++        assert result.name == "ts"
++
++
++class TestCalcTimeStampsStrict:
++
++    def test_empty_series_raises(self):
++        ts = pd.Series([], dtype="datetime64[ns]")
++        with pytest.raises(Exception):
++            calc_time_stamps(ts)
++
++    def test_single_element(self):
++        ts = pd.Series([pd.Timestamp("2024-06-15 12:30:00")])
++        result = calc_time_stamps(ts)
++        assert result["minute"].iloc[0] == 30
++        assert result["hour"].iloc[0] == 12
++        assert result["weekday"].iloc[0] == 5
++        assert result["day"].iloc[0] == 15
++        assert result["month"].iloc[0] == 6
++
++    def test_weekend_timestamps(self):
++        ts = pd.Series([
++            pd.Timestamp("2024-01-06 09:00:00"),  # Saturday
++            pd.Timestamp("2024-01-07 09:00:00"),  # Sunday
++        ])
++        result = calc_time_stamps(ts)
++        assert result["weekday"].tolist() == [5, 6]
++
++    def test_year_boundary(self):
++        ts = pd.Series([
++            pd.Timestamp("2023-12-31 23:59:00"),
++            pd.Timestamp("2024-01-01 00:00:00"),
++        ])
++        result = calc_time_stamps(ts)
++        assert result["month"].iloc[0] == 12
++        assert result["month"].iloc[1] == 1
++        assert result["day"].iloc[0] == 31
++        assert result["day"].iloc[1] == 1
++
++
++class TestPredictorTimestampValidation:
++
++    @pytest.fixture
++    def dummy_predictor(self):
++        class DummyModel:
++            pass
++
++        class DummyTokenizer:
++            pass
++
++        return KronosPredictor(DummyModel(), DummyTokenizer(), device="cpu")
++
++    def test_tuple_timestamps_accepted(self, dummy_predictor, sample_df):
++        x_ts = tuple(pd.date_range("2024-01-01", periods=10, freq="1H"))
++        y_ts = tuple(pd.date_range("2024-01-01 10:00", periods=3, freq="1H"))
++        with pytest.raises(Exception):
++            dummy_predictor.predict(sample_df, x_ts, y_ts, pred_len=3)
++
++    def test_numpy_datetime64_accepted(self, dummy_predictor, sample_df):
++        x_ts = np.array(pd.date_range("2024-01-01", periods=10, freq="1H"), dtype="datetime64[ns]")
++        y_ts = np.array(pd.date_range("2024-01-01 10:00", periods=3, freq="1H"), dtype="datetime64[ns]")
++        with pytest.raises(Exception):
++            dummy_predictor.predict(sample_df, x_ts, y_ts, pred_len=3)
++
++    def test_duplicate_timestamps_accepted(self, dummy_predictor, sample_df):
++        x_ts = pd.Series([pd.Timestamp("2024-01-01")] * 10)
++        y_ts = pd.Series([pd.Timestamp("2024-01-01 10:00")] * 3)
++        with pytest.raises(Exception):
++            dummy_predictor.predict(sample_df, x_ts, y_ts, pred_len=3)

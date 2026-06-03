@@ -484,3 +484,115 @@ class TestTimestampPipeline:
         assert result["hour"].tolist() == [9, 15, 23]
         assert result["day"].tolist() == [15, 30, 1]
         assert result["month"].tolist() == [1, 6, 12]
+
+
+class TestNormalizeTimestampsStrict:
+
+    def test_tuple_input(self):
+        ts_tuple = tuple(pd.date_range("2024-01-01", periods=10, freq="1H"))
+        result = _normalize_timestamps(ts_tuple, "ts")
+        assert isinstance(result, pd.Series)
+        assert pd.api.types.is_datetime64_any_dtype(result)
+        assert len(result) == 10
+
+    def test_series_with_non_default_index(self):
+        ts = pd.Series(pd.date_range("2024-01-01", periods=10, freq="1H"), index=range(5, 15))
+        result = _normalize_timestamps(ts, "ts")
+        assert list(result.index) == list(range(10))
+
+    def test_series_string_timestamps(self):
+        ts = pd.Series([f"2024-01-01 {i:02d}:00:00" for i in range(10)])
+        result = _normalize_timestamps(ts, "ts")
+        assert pd.api.types.is_datetime64_any_dtype(result)
+
+    def test_numeric_values_raises(self):
+        with pytest.raises((ValueError, TypeError)):
+            _normalize_timestamps([1, 2, 3], "ts")
+
+    def test_single_timestamp(self):
+        ts = pd.Series([pd.Timestamp("2024-01-01 10:00:00")])
+        result = _normalize_timestamps(ts, "ts")
+        assert len(result) == 1
+        assert result.iloc[0] == pd.Timestamp("2024-01-01 10:00:00")
+
+    def test_mixed_datetime_types_conversion(self):
+        ts_list = [
+            pd.Timestamp("2024-01-01"),
+            "2024-01-02",
+            np.datetime64("2024-01-03"),
+        ]
+        result = _normalize_timestamps(ts_list, "ts")
+        assert len(result) == 3
+        assert pd.api.types.is_datetime64_any_dtype(result)
+
+    def test_name_preservation(self):
+        ts = pd.Series(pd.date_range("2024-01-01", periods=5, freq="1H"), name="custom_ts")
+        result = _normalize_timestamps(ts, "ts")
+        assert result.name == "ts"
+
+
+class TestCalcTimeStampsStrict:
+
+    def test_empty_series_raises(self):
+        ts = pd.Series([], dtype="datetime64[ns]")
+        with pytest.raises(Exception):
+            calc_time_stamps(ts)
+
+    def test_single_element(self):
+        ts = pd.Series([pd.Timestamp("2024-06-15 12:30:00")])
+        result = calc_time_stamps(ts)
+        assert result["minute"].iloc[0] == 30
+        assert result["hour"].iloc[0] == 12
+        assert result["weekday"].iloc[0] == 5
+        assert result["day"].iloc[0] == 15
+        assert result["month"].iloc[0] == 6
+
+    def test_weekend_timestamps(self):
+        ts = pd.Series([
+            pd.Timestamp("2024-01-06 09:00:00"),  # Saturday
+            pd.Timestamp("2024-01-07 09:00:00"),  # Sunday
+        ])
+        result = calc_time_stamps(ts)
+        assert result["weekday"].tolist() == [5, 6]
+
+    def test_year_boundary(self):
+        ts = pd.Series([
+            pd.Timestamp("2023-12-31 23:59:00"),
+            pd.Timestamp("2024-01-01 00:00:00"),
+        ])
+        result = calc_time_stamps(ts)
+        assert result["month"].iloc[0] == 12
+        assert result["month"].iloc[1] == 1
+        assert result["day"].iloc[0] == 31
+        assert result["day"].iloc[1] == 1
+
+
+class TestPredictorTimestampValidation:
+
+    @pytest.fixture
+    def dummy_predictor(self):
+        class DummyModel:
+            pass
+
+        class DummyTokenizer:
+            pass
+
+        return KronosPredictor(DummyModel(), DummyTokenizer(), device="cpu")
+
+    def test_tuple_timestamps_accepted(self, dummy_predictor, sample_df):
+        x_ts = tuple(pd.date_range("2024-01-01", periods=10, freq="1H"))
+        y_ts = tuple(pd.date_range("2024-01-01 10:00", periods=3, freq="1H"))
+        with pytest.raises(Exception):
+            dummy_predictor.predict(sample_df, x_ts, y_ts, pred_len=3)
+
+    def test_numpy_datetime64_accepted(self, dummy_predictor, sample_df):
+        x_ts = np.array(pd.date_range("2024-01-01", periods=10, freq="1H"), dtype="datetime64[ns]")
+        y_ts = np.array(pd.date_range("2024-01-01 10:00", periods=3, freq="1H"), dtype="datetime64[ns]")
+        with pytest.raises(Exception):
+            dummy_predictor.predict(sample_df, x_ts, y_ts, pred_len=3)
+
+    def test_duplicate_timestamps_accepted(self, dummy_predictor, sample_df):
+        x_ts = pd.Series([pd.Timestamp("2024-01-01")] * 10)
+        y_ts = pd.Series([pd.Timestamp("2024-01-01 10:00")] * 3)
+        with pytest.raises(Exception):
+            dummy_predictor.predict(sample_df, x_ts, y_ts, pred_len=3)
